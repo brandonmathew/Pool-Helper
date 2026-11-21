@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Pool Helper</string>
+    <string name="accessibility_service_label">Pool Helper gestures</string>
+    <string name="accessibility_service_description">Performs aim, spin, and power gestures for Pool Helper. Does not read window content.</string>
+</resources>
