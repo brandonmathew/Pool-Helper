@@ -35,10 +35,12 @@ object CaptureStats {
     @Volatile var meanLuminance: Double = 0.0
     @Volatile var savedFrames: Int = 0
     @Volatile var verdict: String = "not started"
+    @Volatile var framesSinceResize: Long = 0
 
     fun reset() {
         frames = 0; width = 0; height = 0
         blackRatio = 0.0; meanLuminance = 0.0; savedFrames = 0
+        framesSinceResize = 0
         verdict = "starting"
     }
 
@@ -63,6 +65,21 @@ class CaptureService : Service() {
     private var workerThread: HandlerThread? = null
     private var worker: Handler? = null
     private var frameCounter = 0L
+    private var displayListener: DisplayManager.DisplayListener? = null
+
+    /** Current real display size in pixels, adjusted for the live rotation. */
+    private fun currentDisplaySize(): Pair<Int, Int> {
+        val wm = getSystemService(WindowManager::class.java)
+        return if (Build.VERSION.SDK_INT >= 30) {
+            val bounds = wm.currentWindowMetrics.bounds
+            Pair(bounds.width(), bounds.height())
+        } else {
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(metrics)
+            Pair(metrics.widthPixels, metrics.heightPixels)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -115,27 +132,55 @@ class CaptureService : Service() {
             }
         }, null)
 
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        getSystemService(WindowManager::class.java).defaultDisplay.getRealMetrics(metrics)
-        val w = metrics.widthPixels
-        val h = metrics.heightPixels
-
         workerThread = HandlerThread("capture-worker").also { it.start() }
         worker = Handler(workerThread!!.looper)
 
+        val (w, h) = currentDisplaySize()
+        createDisplay(w, h)
+
+        // The game runs landscape while capture usually starts in portrait.
+        // When the display rotates, recreate the virtual display at the new
+        // size so frames are never letterboxed into a stale buffer.
+        val dm = getSystemService(DisplayManager::class.java)
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) {}
+            override fun onDisplayRemoved(displayId: Int) {}
+            override fun onDisplayChanged(displayId: Int) {
+                if (displayId != android.view.Display.DEFAULT_DISPLAY) return
+                val (nw, nh) = currentDisplaySize()
+                if (nw != CaptureStats.width || nh != CaptureStats.height) {
+                    worker?.post { recreateDisplay(nw, nh) }
+                }
+            }
+        }
+        displayListener = listener
+        dm.registerDisplayListener(listener, worker)
+    }
+
+    private fun createDisplay(w: Int, h: Int) {
+        val proj = projection ?: return
+        val density = resources.displayMetrics.densityDpi
         val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 4)
         imageReader = reader
         reader.setOnImageAvailableListener({ r -> onFrame(r) }, worker)
-
         virtualDisplay = proj.createVirtualDisplay(
-            "pool-helper-capture", w, h, metrics.densityDpi,
+            "pool-helper-capture", w, h, density,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             reader.surface, null, worker,
         )
         CaptureStats.running = true
         CaptureStats.width = w
         CaptureStats.height = h
+        CaptureStats.framesSinceResize = 0
+        CaptureStats.blackRatio = 0.0
+    }
+
+    private fun recreateDisplay(w: Int, h: Int) {
+        try { virtualDisplay?.release() } catch (_: Exception) {}
+        try { imageReader?.close() } catch (_: Exception) {}
+        virtualDisplay = null
+        imageReader = null
+        createDisplay(w, h)
     }
 
     private fun onFrame(reader: ImageReader) {
@@ -143,6 +188,7 @@ class CaptureService : Service() {
         try {
             frameCounter++
             CaptureStats.frames = frameCounter
+            CaptureStats.framesSinceResize++
             val plane = image.planes[0]
             val buffer = plane.buffer
             val pixelStride = plane.pixelStride
@@ -180,7 +226,7 @@ class CaptureService : Service() {
                 CaptureStats.blackRatio = CaptureStats.blackRatio * 0.9 + ratio * 0.1
                 CaptureStats.meanLuminance = lumSum / samples
                 CaptureStats.verdict = when {
-                    frameCounter < 90 -> "warming up"
+                    CaptureStats.framesSinceResize < 90 -> "warming up"
                     CaptureStats.blackRatio > 0.98 -> "BLACK FRAMES - FLAG_SECURE suspected"
                     else -> "OK - frames usable"
                 }
@@ -248,6 +294,10 @@ class CaptureService : Service() {
 
     private fun stopCapture() {
         CaptureStats.running = false
+        displayListener?.let {
+            try { getSystemService(DisplayManager::class.java).unregisterDisplayListener(it) } catch (_: Exception) {}
+        }
+        displayListener = null
         try { virtualDisplay?.release() } catch (_: Exception) {}
         try { imageReader?.close() } catch (_: Exception) {}
         try { projection?.stop() } catch (_: Exception) {}

@@ -63,11 +63,7 @@ class MainActivity : Activity() {
         root.addView(button("Accessibility settings (enable gestures)") {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
-        root.addView(button("Share saved frames info") {
-            val dir = java.io.File(filesDir, "frames")
-            val count = dir.listFiles()?.size ?: 0
-            Toast.makeText(this, "$count frame(s) in ${dir.absolutePath}", Toast.LENGTH_LONG).show()
-        })
+        root.addView(button("Share saved frames") { shareFrames() })
 
         root.addView(TextView(this).apply {
             text = "Update channel"
@@ -128,6 +124,45 @@ class MainActivity : Activity() {
                     if (profile.isCalibrated()) "(calibrated)" else "(auto-calibrates when uncalibrated)"
             )
         }
+    }
+
+    /** Zip the saved sample frames and open the share sheet with the zip. */
+    private fun shareFrames() {
+        val dir = java.io.File(filesDir, "frames")
+        val frames = dir.listFiles { f -> f.extension.equals("png", ignoreCase = true) }
+            ?.sortedBy { it.name } ?: emptyList()
+        if (frames.isEmpty()) {
+            Toast.makeText(this, "No saved frames yet — run capture in the game first", Toast.LENGTH_LONG).show()
+            return
+        }
+        Thread {
+            try {
+                val shareDir = java.io.File(cacheDir, "share").also { it.mkdirs() }
+                val zipFile = java.io.File(shareDir, "pool-helper-frames.zip")
+                java.util.zip.ZipOutputStream(java.io.FileOutputStream(zipFile)).use { zip ->
+                    for (f in frames) {
+                        zip.putNextEntry(java.util.zip.ZipEntry(f.name))
+                        java.io.FileInputStream(f).use { it.copyTo(zip) }
+                        zip.closeEntry()
+                    }
+                }
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    this, "$packageName.fileprovider", zipFile,
+                )
+                runOnUiThread {
+                    val intent = Intent(Intent.ACTION_SEND).apply {
+                        type = "application/zip"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(Intent.createChooser(intent, "Share saved frames"))
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "Share failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     private fun requestCapture() {
