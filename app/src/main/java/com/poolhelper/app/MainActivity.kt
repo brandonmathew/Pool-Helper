@@ -64,6 +64,9 @@ class MainActivity : Activity() {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         })
         root.addView(button("Share saved frames") { shareFrames() })
+        root.addView(button("Test crash handler") {
+            Thread { throw RuntimeException("Test crash triggered from the main screen") }.start()
+        })
 
         root.addView(TextView(this).apply {
             text = "Update channel"
